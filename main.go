@@ -10,8 +10,9 @@
 // api/upload's own mediarules.ValidateForTier is what actually enforces it,
 // so a stale copy here can never let something invalid through.
 //
-// Watches one channel. Any message with an image/gif/video attachment gets
-// pushed through the exact same presign -> PUT -> confirm flow the web
+// Watches every channel it can see (not scoped to one), across whatever
+// server(s) it's invited to. Any message with an image/gif/video attachment
+// gets pushed through the exact same presign -> PUT -> confirm flow the web
 // dashboard uses (api/upload), authenticated with a personal API token
 // (spt_..., minted at /dashboard/api), then replies in-channel with the
 // resulting Spools link.
@@ -50,7 +51,6 @@ var extensionContentType = map[string]string{
 
 type config struct {
 	discordToken string
-	channelID    string
 	apiBase      string
 	apiToken     string
 }
@@ -58,7 +58,6 @@ type config struct {
 func loadConfig() (config, error) {
 	cfg := config{
 		discordToken: os.Getenv("DISCORD_BOT_TOKEN"),
-		channelID:    os.Getenv("DISCORD_CHANNEL_ID"),
 		apiBase:      strings.TrimSuffix(os.Getenv("SPOOLS_API_BASE"), "/"),
 		apiToken:     os.Getenv("SPOOLS_API_TOKEN"),
 	}
@@ -68,9 +67,6 @@ func loadConfig() (config, error) {
 	missing := []string{}
 	if cfg.discordToken == "" {
 		missing = append(missing, "DISCORD_BOT_TOKEN")
-	}
-	if cfg.channelID == "" {
-		missing = append(missing, "DISCORD_CHANNEL_ID")
 	}
 	if cfg.apiToken == "" {
 		missing = append(missing, "SPOOLS_API_TOKEN")
@@ -97,7 +93,7 @@ func main() {
 	session.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentMessageContent
 
 	session.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
-		if m.Author.Bot || m.ChannelID != cfg.channelID || len(m.Attachments) == 0 {
+		if m.Author.Bot || len(m.Attachments) == 0 {
 			return
 		}
 		// Handled off the gateway's event goroutine so a slow upload never
@@ -110,7 +106,7 @@ func main() {
 	}
 	defer session.Close()
 
-	log.Printf("watching channel %s, posting to %s", cfg.channelID, cfg.apiBase)
+	log.Printf("watching all channels, posting to %s", cfg.apiBase)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)

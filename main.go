@@ -1,53 +1,33 @@
 // Standalone Go process, not a Vercel function - this one needs a real
 // persistent connection to Discord's gateway (a websocket), which a
 // request/response serverless function can't hold open. Deployed to its own
-// host (not Vercel), as its own Go module with nothing else attached -
-// deliberately NOT importing api/_lib/mediarules from the main repo module,
-// even though it duplicates that package's tiny extension/content-type
-// table, so this directory can be uploaded to a third-party host on its own
-// without dragging the rest of Spools' private source along with it. The
-// extension list below is cosmetic (a pre-check for a nicer error message);
-// api/upload's own mediarules.ValidateForTier is what actually enforces it,
-// so a stale copy here can never let something invalid through.
+// host (not Vercel), as its own Go module with nothing else attached - see
+// upload.go's comment for why the extension/content-type rules are
+// duplicated here instead of importing the main Spools repo's mediarules
+// package.
 //
-// Watches every channel it can see (not scoped to one), across whatever
-// server(s) it's invited to. Any message with an image/gif/video attachment
-// gets pushed through the exact same presign -> PUT -> confirm flow the web
-// dashboard uses (api/upload), authenticated with a personal API token
-// (spt_..., minted at /dashboard/api), then replies in-channel with the
-// resulting Spools link.
+// Watches every channel it can see, across whatever server(s) it's invited
+// to (global slash commands, no guild-specific setup). On a message with an
+// image/gif/video attachment, it asks (via an embed + button) before
+// uploading - unless that user has turned prompts off with /autoprompt.
+// Clicking Upload runs the attachment through the same presign -> PUT ->
+// confirm flow the web dashboard uses (api/upload), authenticated with a
+// personal API token (spt_..., minted at /dashboard/api), then edits the
+// prompt with the resulting link.
 package main
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
 )
-
-// Mirrors api/_lib/mediarules.Rules/ContentTypes (not imported - see the
-// package comment above). Keep in sync by hand if those ever change.
-var extensionCategory = map[string]string{
-	"jpg": "image", "jpeg": "image", "png": "image", "webp": "image",
-	"gif": "gif",
-	"mp4": "video", "mov": "video",
-}
-
-var extensionContentType = map[string]string{
-	"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp",
-	"gif": "image/gif",
-	"mp4": "video/mp4", "mov": "video/quicktime",
-}
 
 type config struct {
 	discordToken string
@@ -83,6 +63,14 @@ func main() {
 		log.Fatal(err)
 	}
 
+	prefs := loadPrefs("prefs.json")
+	pending := newPendingStore()
+	go func() {
+		for range time.Tick(10 * time.Minute) {
+			pending.sweepStale(30 * time.Minute)
+		}
+	}()
+
 	session, err := discordgo.New("Bot " + cfg.discordToken)
 	if err != nil {
 		log.Fatalf("could not create discord session: %v", err)
@@ -90,15 +78,39 @@ func main() {
 	// MessageContent is a privileged intent - must also be switched on for
 	// this bot under Settings -> Bot in the Discord developer portal, no
 	// approval needed below 100 servers.
-	session.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentMessageContent
+	session.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildMessages | discordgo.IntentMessageContent
+
+	// Discord replays every guild the bot is already in as a GuildCreate
+	// event right after Ready, with no field distinguishing that from a
+	// genuinely new join. The common workaround: only treat GuildCreate as
+	// "just joined" once a few seconds have passed since Ready, by which
+	// point that replay has finished and anything arriving after is real.
+	var ready atomic.Bool
+
+	session.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
+		log.Printf("logged in as %s", r.User.String())
+		if err := registerCommands(s); err != nil {
+			log.Printf("could not register slash commands: %v", err)
+		}
+		time.AfterFunc(5*time.Second, func() { ready.Store(true) })
+	})
+
+	session.AddHandler(func(s *discordgo.Session, g *discordgo.GuildCreate) {
+		if !ready.Load() {
+			return // part of the startup sync, not a new join
+		}
+		sendWelcome(s, g.Guild)
+	})
 
 	session.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
 		if m.Author.Bot || len(m.Attachments) == 0 {
 			return
 		}
-		// Handled off the gateway's event goroutine so a slow upload never
-		// delays heartbeats/other events.
-		go handleMessage(s, cfg, m)
+		go handleMessage(s, prefs, pending, m)
+	})
+
+	session.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+		handleInteraction(s, i, cfg, prefs, pending)
 	})
 
 	if err := session.Open(); err != nil {
@@ -114,184 +126,53 @@ func main() {
 	log.Println("shutting down")
 }
 
-func handleMessage(s *discordgo.Session, cfg config, m *discordgo.MessageCreate) {
+// sendWelcome tries the server's configured system channel first (the same
+// one Discord's own "X joined the server" messages use), then falls back to
+// the first text channel the bot can actually post in.
+func sendWelcome(s *discordgo.Session, g *discordgo.Guild) {
+	embed := welcomeEmbed()
+
+	if g.SystemChannelID != "" {
+		if _, err := s.ChannelMessageSendEmbed(g.SystemChannelID, embed); err == nil {
+			return
+		}
+	}
+
+	for _, ch := range g.Channels {
+		if ch.Type != discordgo.ChannelTypeGuildText {
+			continue
+		}
+		if _, err := s.ChannelMessageSendEmbed(ch.ID, embed); err == nil {
+			return
+		}
+	}
+	log.Printf("could not find a postable channel to welcome guild %s", g.ID)
+}
+
+func handleMessage(s *discordgo.Session, prefs *prefStore, pending *pendingStore, m *discordgo.MessageCreate) {
+	var uploadable []*discordgo.MessageAttachment
 	for _, att := range m.Attachments {
-		category, ext, ok := categoryFor(att.Filename)
-		if !ok {
-			continue
+		if _, _, ok := categoryFor(att.Filename); ok {
+			uploadable = append(uploadable, att)
 		}
-
-		link, err := uploadAttachment(cfg, att, category, ext)
-		if err != nil {
-			reply(s, m, fmt.Sprintf("couldn't upload %s: %v", att.Filename, err))
-			continue
-		}
-		reply(s, m, fmt.Sprintf("uploaded %s → %s", att.Filename, link))
 	}
-}
-
-func reply(s *discordgo.Session, m *discordgo.MessageCreate, content string) {
-	if _, err := s.ChannelMessageSendReply(m.ChannelID, content, m.Reference()); err != nil {
-		log.Printf("could not send reply: %v", err)
-	}
-}
-
-// categoryFor mirrors api/upload's own rule: the extension decides the
-// category, anything unrecognized is skipped rather than guessed at.
-func categoryFor(filename string) (category, ext string, ok bool) {
-	ext = strings.ToLower(strings.TrimPrefix(filepath.Ext(filename), "."))
-	category, ok = extensionCategory[ext]
-	return category, ext, ok
-}
-
-type presignRequest struct {
-	Filename    string `json:"filename"`
-	ContentType string `json:"contentType"`
-	Size        int64  `json:"size"`
-	Category    string `json:"category"`
-}
-
-type presignResponse struct {
-	UploadURL string `json:"uploadUrl"`
-	Key       string `json:"key"`
-}
-
-type confirmRequest struct {
-	Key         string `json:"key"`
-	Filename    string `json:"filename"`
-	ContentType string `json:"contentType"`
-	Size        int64  `json:"size"`
-	Category    string `json:"category"`
-}
-
-type confirmResponse struct {
-	Key string `json:"key"`
-	URL string `json:"url"`
-}
-
-type apiErrorBody struct {
-	Error string `json:"error"`
-}
-
-func uploadAttachment(cfg config, att *discordgo.MessageAttachment, category, ext string) (string, error) {
-	contentType := extensionContentType[ext]
-	if contentType == "" {
-		contentType = att.ContentType
+	if len(uploadable) == 0 {
+		return
 	}
 
-	data, err := downloadAttachment(att.URL)
+	if !prefs.autoPromptEnabled(m.Author.ID) {
+		return
+	}
+
+	id := pending.add(m.Author.ID, uploadable)
+	embed, row := askEmbed(uploadable, id)
+
+	_, err := s.ChannelMessageSendComplex(m.ChannelID, &discordgo.MessageSend{
+		Embeds:     []*discordgo.MessageEmbed{embed},
+		Components: []discordgo.MessageComponent{row},
+		Reference:  m.Reference(),
+	})
 	if err != nil {
-		return "", fmt.Errorf("download failed: %w", err)
+		log.Printf("could not send upload prompt: %v", err)
 	}
-
-	var presigned presignResponse
-	err = spoolsPost(cfg, "presign", presignRequest{
-		Filename:    att.Filename,
-		ContentType: contentType,
-		Size:        int64(len(data)),
-		Category:    category,
-	}, &presigned)
-	if err != nil {
-		return "", fmt.Errorf("presign failed: %w", err)
-	}
-
-	if err := putObject(presigned.UploadURL, contentType, data); err != nil {
-		return "", fmt.Errorf("upload to storage failed: %w", err)
-	}
-
-	var confirmed confirmResponse
-	err = spoolsPost(cfg, "confirm", confirmRequest{
-		Key:         presigned.Key,
-		Filename:    att.Filename,
-		ContentType: contentType,
-		Size:        int64(len(data)),
-		Category:    category,
-	}, &confirmed)
-	if err != nil {
-		return "", fmt.Errorf("confirm failed: %w", err)
-	}
-
-	return cfg.apiBase + confirmed.URL, nil
-}
-
-func downloadAttachment(url string) ([]byte, error) {
-	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Get(url)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("discord returned %d fetching attachment", resp.StatusCode)
-	}
-	return io.ReadAll(resp.Body)
-}
-
-// spoolsPost calls POST {apiBase}/api/upload with the "action"-dispatched
-// envelope api/upload/index.go expects, same shape the web dashboard sends.
-func spoolsPost(cfg config, action string, payload any, out any) error {
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-
-	var envelope map[string]any
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		return err
-	}
-	envelope["action"] = action
-	body, err = json.Marshal(envelope)
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequest(http.MethodPost, cfg.apiBase+"/api/upload", bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+cfg.apiToken)
-
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		var apiErr apiErrorBody
-		if json.Unmarshal(respBody, &apiErr) == nil && apiErr.Error != "" {
-			return fmt.Errorf("%s", apiErr.Error)
-		}
-		return fmt.Errorf("spools api returned %d", resp.StatusCode)
-	}
-
-	return json.Unmarshal(respBody, out)
-}
-
-func putObject(uploadURL, contentType string, data []byte) error {
-	req, err := http.NewRequest(http.MethodPut, uploadURL, bytes.NewReader(data))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", contentType)
-
-	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("storage returned %d: %s", resp.StatusCode, string(b))
-	}
-	return nil
 }

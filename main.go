@@ -86,13 +86,19 @@ func main() {
 	// "just joined" once a few seconds have passed since Ready, by which
 	// point that replay has finished and anything arriving after is real.
 	var ready atomic.Bool
+	// session.Open() returning only means the websocket handshake started,
+	// not that Discord's READY dispatch (where the bot actually becomes
+	// usable) has arrived yet - closed once, in the Ready handler below, so
+	// main() can block on it instead of just assuming it already happened.
+	readyCh := make(chan struct{})
 
 	session.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
-		log.Printf("logged in as %s", r.User.String())
+		log.Printf("READY event received, logged in as %s", r.User.String())
 		if err := registerCommands(s); err != nil {
 			log.Printf("could not register slash commands: %v", err)
 		}
 		time.AfterFunc(5*time.Second, func() { ready.Store(true) })
+		close(readyCh)
 	})
 
 	session.AddHandler(func(s *discordgo.Session, g *discordgo.GuildCreate) {
@@ -118,7 +124,13 @@ func main() {
 	}
 	defer session.Close()
 
-	log.Printf("watching all channels, posting to %s", cfg.apiBase)
+	log.Println("websocket open, waiting for Discord's READY event...")
+	select {
+	case <-readyCh:
+		log.Printf("watching all channels, posting to %s", cfg.apiBase)
+	case <-time.After(20 * time.Second):
+		log.Println("WARNING: no READY event received within 20s - connected but the gateway handshake may be stuck; slash commands will not be registered until it arrives")
+	}
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)

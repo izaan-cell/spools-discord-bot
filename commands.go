@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,8 +37,19 @@ var slashCommands = []*discordgo.ApplicationCommand{
 // commands take up to an hour to propagate on first registration, which is
 // a one-time cost, not a per-restart one (Discord caches them).
 func registerCommands(s *discordgo.Session) error {
-	_, err := s.ApplicationCommandBulkOverwrite(s.State.User.ID, "", slashCommands)
-	return err
+	if s.State == nil || s.State.User == nil || s.State.User.ID == "" {
+		return fmt.Errorf("session has no authenticated user yet")
+	}
+	created, err := s.ApplicationCommandBulkOverwrite(s.State.User.ID, "", slashCommands)
+	if err != nil {
+		return err
+	}
+	names := make([]string, len(created))
+	for i, c := range created {
+		names[i] = "/" + c.Name
+	}
+	log.Printf("registered %d slash commands: %s", len(created), strings.Join(names, ", "))
+	return nil
 }
 
 // pendingUpload is one ask-embed's worth of attachments, waiting on its

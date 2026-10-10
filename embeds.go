@@ -42,6 +42,7 @@ func helpEmbed() *discordgo.MessageEmbed {
 			{
 				Name: "Commands",
 				Value: "**/help** - show this message\n" +
+					"**/upload file:<attachment>** - upload a file directly, no prompt needed\n" +
 					"**/autoprompt enabled:<true/false>** - turn the upload prompt on or off for yourself",
 			},
 			{

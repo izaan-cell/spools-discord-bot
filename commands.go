@@ -29,6 +29,18 @@ var slashCommands = []*discordgo.ApplicationCommand{
 			},
 		},
 	},
+	{
+		Name:        "upload",
+		Description: "Upload an image, GIF, or video to Spools directly",
+		Options: []*discordgo.ApplicationCommandOption{
+			{
+				Type:        discordgo.ApplicationCommandOptionAttachment,
+				Name:        "file",
+				Description: "The file to upload",
+				Required:    true,
+			},
+		},
+	},
 }
 
 // registerCommands is called once on Ready. Global (no guild ID) so the
@@ -111,13 +123,13 @@ func randomID() string {
 func handleInteraction(s *discordgo.Session, i *discordgo.InteractionCreate, cfg config, prefs *prefStore, pending *pendingStore) {
 	switch i.Type {
 	case discordgo.InteractionApplicationCommand:
-		handleSlashCommand(s, i, prefs)
+		handleSlashCommand(s, i, cfg, prefs)
 	case discordgo.InteractionMessageComponent:
 		handleButtonClick(s, i, cfg, pending)
 	}
 }
 
-func handleSlashCommand(s *discordgo.Session, i *discordgo.InteractionCreate, prefs *prefStore) {
+func handleSlashCommand(s *discordgo.Session, i *discordgo.InteractionCreate, cfg config, prefs *prefStore) {
 	data := i.ApplicationCommandData()
 	switch data.Name {
 	case "help":
@@ -134,6 +146,46 @@ func handleSlashCommand(s *discordgo.Session, i *discordgo.InteractionCreate, pr
 			state = "off"
 		}
 		respondEphemeral(s, i, fmt.Sprintf("Upload prompts are now **%s** for you.", state))
+	case "upload":
+		handleUploadCommand(s, i, cfg, data)
+	}
+}
+
+// handleUploadCommand is /upload's handler: unlike the passive flow, this
+// one skips the ask-embed entirely - running the command IS the explicit
+// confirmation, so it uploads immediately and reports the result.
+func handleUploadCommand(s *discordgo.Session, i *discordgo.InteractionCreate, cfg config, data discordgo.ApplicationCommandInteractionData) {
+	opt := data.GetOption("file")
+	if opt == nil {
+		respondEphemeral(s, i, "No file was attached.")
+		return
+	}
+	attachmentID, ok := opt.Value.(string)
+	if !ok || data.Resolved == nil {
+		respondEphemeral(s, i, "Couldn't read that attachment, try again.")
+		return
+	}
+	att, ok := data.Resolved.Attachments[attachmentID]
+	if !ok {
+		respondEphemeral(s, i, "Couldn't read that attachment, try again.")
+		return
+	}
+
+	// Uploads can take a few seconds; acknowledge immediately (Discord
+	// requires a response within 3s) and edit with the real result once done.
+	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+	}); err != nil {
+		log.Printf("could not ack /upload: %v", err)
+		return
+	}
+
+	result := uploadAttachment(cfg, att)
+	embed := resultEmbed([]uploadResult{result})
+	if _, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+		Embeds: &[]*discordgo.MessageEmbed{embed},
+	}); err != nil {
+		log.Printf("could not edit /upload result: %v", err)
 	}
 }
 

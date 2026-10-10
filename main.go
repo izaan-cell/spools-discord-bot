@@ -8,12 +8,13 @@
 //
 // Watches every channel it can see, across whatever server(s) it's invited
 // to (global slash commands, no guild-specific setup). On a message with an
-// image/gif/video attachment, it asks (via an embed + button) before
-// uploading - unless that user has turned prompts off with /autoprompt.
-// Clicking Upload runs the attachment through the same presign -> PUT ->
-// confirm flow the web dashboard uses (api/upload), authenticated with a
-// personal API token (spt_..., minted at /dashboard/api), then edits the
-// prompt with the resulting link.
+// image/gif/video attachment, it asks (via an embed + button, which opens a
+// description modal) before uploading - unless that user has turned prompts
+// off with /autoprompt. Every account-specific thing (linking, prefs,
+// ownership) is resolved server-side by api/discord-bot in the main Spools
+// repo; this process holds no state of its own beyond in-flight pending
+// uploads, and never sees a Spools API token or DATABASE_URL, only the one
+// shared DISCORD_BOT_SECRET.
 package main
 
 import (
@@ -32,14 +33,14 @@ import (
 type config struct {
 	discordToken string
 	apiBase      string
-	apiToken     string
+	botSecret    string
 }
 
 func loadConfig() (config, error) {
 	cfg := config{
 		discordToken: os.Getenv("DISCORD_BOT_TOKEN"),
 		apiBase:      strings.TrimSuffix(os.Getenv("SPOOLS_API_BASE"), "/"),
-		apiToken:     os.Getenv("SPOOLS_API_TOKEN"),
+		botSecret:    os.Getenv("DISCORD_BOT_SECRET"),
 	}
 	if cfg.apiBase == "" {
 		cfg.apiBase = "https://spools.studio"
@@ -48,8 +49,8 @@ func loadConfig() (config, error) {
 	if cfg.discordToken == "" {
 		missing = append(missing, "DISCORD_BOT_TOKEN")
 	}
-	if cfg.apiToken == "" {
-		missing = append(missing, "SPOOLS_API_TOKEN")
+	if cfg.botSecret == "" {
+		missing = append(missing, "DISCORD_BOT_SECRET")
 	}
 	if len(missing) > 0 {
 		return cfg, fmt.Errorf("missing required env vars: %s", strings.Join(missing, ", "))
@@ -63,7 +64,6 @@ func main() {
 		log.Fatal(err)
 	}
 
-	prefs := loadPrefs("prefs.json")
 	pending := newPendingStore()
 	go func() {
 		for range time.Tick(10 * time.Minute) {
@@ -112,11 +112,11 @@ func main() {
 		if m.Author.Bot || len(m.Attachments) == 0 {
 			return
 		}
-		go handleMessage(s, prefs, pending, m)
+		go handleMessage(s, cfg, pending, m)
 	})
 
 	session.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
-		handleInteraction(s, i, cfg, prefs, pending)
+		handleInteraction(s, i, cfg, pending)
 	})
 
 	if err := session.Open(); err != nil {
@@ -161,7 +161,7 @@ func sendWelcome(s *discordgo.Session, g *discordgo.Guild) {
 	log.Printf("could not find a postable channel to welcome guild %s", g.ID)
 }
 
-func handleMessage(s *discordgo.Session, prefs *prefStore, pending *pendingStore, m *discordgo.MessageCreate) {
+func handleMessage(s *discordgo.Session, cfg config, pending *pendingStore, m *discordgo.MessageCreate) {
 	var uploadable []*discordgo.MessageAttachment
 	for _, att := range m.Attachments {
 		if _, _, ok := categoryFor(att.Filename); ok {
@@ -172,7 +172,10 @@ func handleMessage(s *discordgo.Session, prefs *prefStore, pending *pendingStore
 		return
 	}
 
-	if !prefs.autoPromptEnabled(m.Author.ID) {
+	// One network round trip to the backend per qualifying message - fine
+	// at this bot's scale, and keeps "on by default" authoritative in one
+	// place (Supabase) instead of a local cache that could drift from it.
+	if !autoPromptEnabled(cfg, m.Author.ID) {
 		return
 	}
 

@@ -15,7 +15,10 @@ import (
 
 // Mirrors api/_lib/mediarules.Rules/ContentTypes in the main Spools repo
 // (not imported - this module is deliberately standalone, see main.go's
-// package comment). Keep in sync by hand if those ever change.
+// package comment). Keep in sync by hand if those ever change. Purely a
+// client-side pre-check for a nicer error message - api/_lib/uploadcore on
+// the server is what actually enforces this, a stale copy here can never
+// let something invalid through.
 var extensionCategory = map[string]string{
 	"jpg": "image", "jpeg": "image", "png": "image", "webp": "image",
 	"gif": "gif",
@@ -28,52 +31,30 @@ var extensionContentType = map[string]string{
 	"mp4": "video/mp4", "mov": "video/quicktime",
 }
 
-// categoryFor mirrors api/upload's own rule: the extension decides the
-// category, anything unrecognized is skipped rather than guessed at.
 func categoryFor(filename string) (category, ext string, ok bool) {
 	ext = strings.ToLower(strings.TrimPrefix(filepath.Ext(filename), "."))
 	category, ok = extensionCategory[ext]
 	return category, ext, ok
 }
 
-type presignRequest struct {
-	Filename    string `json:"filename"`
-	ContentType string `json:"contentType"`
-	Size        int64  `json:"size"`
-	Category    string `json:"category"`
-}
-
-type presignResponse struct {
-	UploadURL string `json:"uploadUrl"`
-	Key       string `json:"key"`
-}
-
-type confirmRequest struct {
-	Key         string `json:"key"`
-	Filename    string `json:"filename"`
-	ContentType string `json:"contentType"`
-	Size        int64  `json:"size"`
-	Category    string `json:"category"`
-}
-
-type confirmResponse struct {
-	Key string `json:"key"`
-	URL string `json:"url"`
-}
-
-type apiErrorBody struct {
-	Error string `json:"error"`
-}
-
 // uploadResult is one attachment's outcome, used to build the result embed
-// after a button click - Link is set on success, Err on failure, never both.
+// after a button click or /upload - Link is set on success, Err on failure.
 type uploadResult struct {
 	Filename string
 	Link     string
 	Err      error
 }
 
-func uploadAttachment(cfg config, att *discordgo.MessageAttachment) uploadResult {
+// uploadAttachment downloads the attachment from Discord and pushes it
+// through api/discord-bot's upload-presign -> PUT -> upload-confirm, the
+// same three steps api/upload's own presign/confirm do for the website -
+// just fronted by one more hop so the bot never needs a Spools API token at
+// all, only the shared bot secret already on every request (see botAPI).
+// Server-side resolves discordUserID to whichever Spools account should
+// own this (their own linked account, or the shared fallback), and - for
+// the fallback case - appends the mandatory attribution line to
+// description itself; the bot doesn't compose that locally.
+func uploadAttachment(cfg config, discordUserID string, att *discordgo.MessageAttachment, description string) uploadResult {
 	category, ext, ok := categoryFor(att.Filename)
 	if !ok {
 		return uploadResult{Filename: att.Filename, Err: fmt.Errorf("unsupported file type")}
@@ -89,12 +70,16 @@ func uploadAttachment(cfg config, att *discordgo.MessageAttachment) uploadResult
 		return uploadResult{Filename: att.Filename, Err: fmt.Errorf("download failed: %w", err)}
 	}
 
-	var presigned presignResponse
-	err = spoolsPost(cfg, "presign", presignRequest{
-		Filename:    att.Filename,
-		ContentType: contentType,
-		Size:        int64(len(data)),
-		Category:    category,
+	var presigned struct {
+		UploadURL string `json:"uploadUrl"`
+		Key       string `json:"key"`
+	}
+	err = botAPI(cfg, "upload-presign", map[string]any{
+		"discordUserId": discordUserID,
+		"filename":      att.Filename,
+		"contentType":   contentType,
+		"size":          len(data),
+		"category":      category,
 	}, &presigned)
 	if err != nil {
 		return uploadResult{Filename: att.Filename, Err: fmt.Errorf("presign failed: %w", err)}
@@ -104,13 +89,19 @@ func uploadAttachment(cfg config, att *discordgo.MessageAttachment) uploadResult
 		return uploadResult{Filename: att.Filename, Err: fmt.Errorf("upload to storage failed: %w", err)}
 	}
 
-	var confirmed confirmResponse
-	err = spoolsPost(cfg, "confirm", confirmRequest{
-		Key:         presigned.Key,
-		Filename:    att.Filename,
-		ContentType: contentType,
-		Size:        int64(len(data)),
-		Category:    category,
+	var confirmed struct {
+		Key string `json:"key"`
+		URL string `json:"url"`
+	}
+	err = botAPI(cfg, "upload-confirm", map[string]any{
+		"discordUserId": discordUserID,
+		"key":           presigned.Key,
+		"filename":      att.Filename,
+		"contentType":   contentType,
+		"size":          len(data),
+		"category":      category,
+		"isPublic":      true,
+		"description":   description,
 	}, &confirmed)
 	if err != nil {
 		return uploadResult{Filename: att.Filename, Err: fmt.Errorf("confirm failed: %w", err)}
@@ -132,30 +123,27 @@ func downloadAttachment(url string) ([]byte, error) {
 	return io.ReadAll(resp.Body)
 }
 
-// spoolsPost calls POST {apiBase}/api/upload with the "action"-dispatched
-// envelope api/upload/index.go expects, same shape the web dashboard sends.
-func spoolsPost(cfg config, action string, payload any, out any) error {
+type apiErrorBody struct {
+	Error string `json:"error"`
+}
+
+// botAPI calls POST {apiBase}/api/discord-bot, authenticated with the one
+// shared secret this bot has (DISCORD_BOT_SECRET) - never a Spools API
+// token for any account. Every action (link, unlink, prefs, uploads, edit)
+// goes through this one function.
+func botAPI(cfg config, action string, payload map[string]any, out any) error {
+	payload["action"] = action
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
 
-	var envelope map[string]any
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		return err
-	}
-	envelope["action"] = action
-	body, err = json.Marshal(envelope)
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequest(http.MethodPost, cfg.apiBase+"/api/upload", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, cfg.apiBase+"/api/discord-bot", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+cfg.apiToken)
+	req.Header.Set("Authorization", "Bearer "+cfg.botSecret)
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
@@ -177,6 +165,9 @@ func spoolsPost(cfg config, action string, payload any, out any) error {
 		return fmt.Errorf("spools api returned %d", resp.StatusCode)
 	}
 
+	if out == nil {
+		return nil
+	}
 	return json.Unmarshal(respBody, out)
 }
 

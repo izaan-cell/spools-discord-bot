@@ -1,13 +1,13 @@
 name: keepalive
 
 # blitz.cloud's free tier stops a background app after 2 days with no
-# sign-in, deploy, or dashboard visit. This pushes a trivial commit daily
-# (comfortably inside that 2-day window even if a run is delayed) so
-# blitz.cloud's GitHub auto-deploy counts as activity and the app never
-# needs a manual nudge.
+# sign-in, deploy, or dashboard visit. This pushes a trivial commit every
+# 12 hours - a 36-hour buffer inside that 2-day window even if a run gets
+# delayed or skipped once - so blitz.cloud's GitHub auto-deploy counts as
+# activity and the app never needs a manual nudge.
 on:
   schedule:
-    - cron: "0 12 * * *"
+    - cron: "0 0,12 * * *"
   workflow_dispatch: {}
 
 permissions:

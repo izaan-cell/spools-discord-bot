@@ -1,0 +1,31 @@
+name: keepalive
+
+# blitz.cloud's free tier stops a background app after 2 days with no
+# sign-in, deploy, or dashboard visit. This pushes a trivial commit daily
+# (comfortably inside that 2-day window even if a run is delayed) so
+# blitz.cloud's GitHub auto-deploy counts as activity and the app never
+# needs a manual nudge.
+on:
+  schedule:
+    - cron: "0 12 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bump timestamp
+        run: date -u +"%Y-%m-%dT%H:%M:%SZ" > .keepalive
+
+      - name: Commit and push if changed
+        run: |
+          git config user.name "keepalive-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add .keepalive
+          git diff --cached --quiet || git commit -m "keepalive: $(cat .keepalive)"
+          git push

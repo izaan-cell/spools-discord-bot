@@ -41,6 +41,12 @@ var slashCommands = []*discordgo.ApplicationCommand{
 			},
 			{
 				Type:        discordgo.ApplicationCommandOptionString,
+				Name:        "name",
+				Description: "Optional name, instead of the original filename",
+				Required:    false,
+			},
+			{
+				Type:        discordgo.ApplicationCommandOptionString,
 				Name:        "description",
 				Description: "Optional note to attach to this upload",
 				Required:    false,
@@ -310,6 +316,10 @@ func handleUploadCommand(s *discordgo.Session, i *discordgo.InteractionCreate, c
 		respondEphemeral(s, i, "Couldn't read that attachment, try again.")
 		return
 	}
+	name := ""
+	if nameOpt := data.GetOption("name"); nameOpt != nil {
+		name = strings.TrimSpace(nameOpt.StringValue())
+	}
 	description := ""
 	if descOpt := data.GetOption("description"); descOpt != nil {
 		description = strings.TrimSpace(descOpt.StringValue())
@@ -324,7 +334,7 @@ func handleUploadCommand(s *discordgo.Session, i *discordgo.InteractionCreate, c
 		return
 	}
 
-	result := uploadAttachment(cfg, interactionUserID(i), att, description)
+	result := uploadAttachment(cfg, interactionUserID(i), att, name, description)
 	embed := resultEmbed([]uploadResult{result})
 	if _, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
 		Embeds: &[]*discordgo.MessageEmbed{embed},
@@ -413,6 +423,18 @@ func handleButtonClick(s *discordgo.Session, i *discordgo.InteractionCreate, pen
 			CustomID: data.CustomID,
 			Title:    "Upload to Spools",
 			Components: []discordgo.MessageComponent{
+				// Discord requires each modal text input in its own row -
+				// can't put name and description side by side in one.
+				discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+					discordgo.TextInput{
+						CustomID:    "name",
+						Label:       "Name (optional)",
+						Style:       discordgo.TextInputShort,
+						Required:    false,
+						MaxLength:   200,
+						Placeholder: "Leave blank to keep the original filename",
+					},
+				}},
 				discordgo.ActionsRow{Components: []discordgo.MessageComponent{
 					discordgo.TextInput{
 						CustomID:    "description",
@@ -442,12 +464,8 @@ func handleModalSubmit(s *discordgo.Session, i *discordgo.InteractionCreate, cfg
 		return
 	}
 
-	description := ""
-	if row, ok := data.Components[0].(*discordgo.ActionsRow); ok && len(row.Components) > 0 {
-		if input, ok := row.Components[0].(*discordgo.TextInput); ok {
-			description = strings.TrimSpace(input.Value)
-		}
-	}
+	name := textInputValue(data.Components, 0)
+	description := textInputValue(data.Components, 1)
 
 	// Uploads can take a few seconds; acknowledge immediately and follow up.
 	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
@@ -460,7 +478,13 @@ func handleModalSubmit(s *discordgo.Session, i *discordgo.InteractionCreate, cfg
 	userID := interactionUserID(i)
 	results := make([]uploadResult, len(item.attachments))
 	for idx, att := range item.attachments {
-		results[idx] = uploadAttachment(cfg, userID, att, description)
+		// A custom name applies to every attachment in this prompt, so more
+		// than one gets a (2), (3)... suffix rather than identical filenames.
+		attName := name
+		if attName != "" && len(item.attachments) > 1 {
+			attName = fmt.Sprintf("%s (%d)", name, idx+1)
+		}
+		results[idx] = uploadAttachment(cfg, userID, att, attName, description)
 	}
 
 	embed := resultEmbed(results)
@@ -469,6 +493,24 @@ func handleModalSubmit(s *discordgo.Session, i *discordgo.InteractionCreate, cfg
 	}); err != nil {
 		log.Printf("could not edit upload result: %v", err)
 	}
+}
+
+// textInputValue reads the single TextInput out of the row at index idx -
+// each modal row holds exactly one, per Discord's own constraint. Returns ""
+// for a missing row or an unset field, same as if it were never typed.
+func textInputValue(components []discordgo.MessageComponent, idx int) string {
+	if idx >= len(components) {
+		return ""
+	}
+	row, ok := components[idx].(*discordgo.ActionsRow)
+	if !ok || len(row.Components) == 0 {
+		return ""
+	}
+	input, ok := row.Components[0].(*discordgo.TextInput)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(input.Value)
 }
 
 func interactionUserID(i *discordgo.InteractionCreate) string {

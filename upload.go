@@ -54,7 +54,7 @@ type uploadResult struct {
 // own this (their own linked account, or the shared fallback), and - for
 // the fallback case - appends the mandatory attribution line to
 // description itself; the bot doesn't compose that locally.
-func uploadAttachment(cfg config, discordUserID string, att *discordgo.MessageAttachment, description string) uploadResult {
+func uploadAttachment(cfg config, discordUserID string, att *discordgo.MessageAttachment, customName, description string) uploadResult {
 	category, ext, ok := categoryFor(att.Filename)
 	if !ok {
 		return uploadResult{Filename: att.Filename, Err: fmt.Errorf("unsupported file type")}
@@ -65,9 +65,18 @@ func uploadAttachment(cfg config, discordUserID string, att *discordgo.MessageAt
 		contentType = att.ContentType
 	}
 
+	// Keep the real extension regardless of what's typed in the name field -
+	// the content-type/category checks above already depend on it, and a
+	// renamed-without-an-extension file would otherwise stop being
+	// recognized as an image/gif/video everywhere else that reads it back.
+	filename := att.Filename
+	if customName != "" {
+		filename = strings.TrimSuffix(customName, "."+ext) + "." + ext
+	}
+
 	data, err := downloadAttachment(att.URL)
 	if err != nil {
-		return uploadResult{Filename: att.Filename, Err: fmt.Errorf("download failed: %w", err)}
+		return uploadResult{Filename: filename, Err: fmt.Errorf("download failed: %w", err)}
 	}
 
 	var presigned struct {
@@ -76,17 +85,17 @@ func uploadAttachment(cfg config, discordUserID string, att *discordgo.MessageAt
 	}
 	err = botAPI(cfg, "upload-presign", map[string]any{
 		"discordUserId": discordUserID,
-		"filename":      att.Filename,
+		"filename":      filename,
 		"contentType":   contentType,
 		"size":          len(data),
 		"category":      category,
 	}, &presigned)
 	if err != nil {
-		return uploadResult{Filename: att.Filename, Err: fmt.Errorf("presign failed: %w", err)}
+		return uploadResult{Filename: filename, Err: fmt.Errorf("presign failed: %w", err)}
 	}
 
 	if err := putObject(presigned.UploadURL, contentType, data); err != nil {
-		return uploadResult{Filename: att.Filename, Err: fmt.Errorf("upload to storage failed: %w", err)}
+		return uploadResult{Filename: filename, Err: fmt.Errorf("upload to storage failed: %w", err)}
 	}
 
 	var confirmed struct {
@@ -96,7 +105,7 @@ func uploadAttachment(cfg config, discordUserID string, att *discordgo.MessageAt
 	err = botAPI(cfg, "upload-confirm", map[string]any{
 		"discordUserId": discordUserID,
 		"key":           presigned.Key,
-		"filename":      att.Filename,
+		"filename":      filename,
 		"contentType":   contentType,
 		"size":          len(data),
 		"category":      category,
@@ -104,10 +113,10 @@ func uploadAttachment(cfg config, discordUserID string, att *discordgo.MessageAt
 		"description":   description,
 	}, &confirmed)
 	if err != nil {
-		return uploadResult{Filename: att.Filename, Err: fmt.Errorf("confirm failed: %w", err)}
+		return uploadResult{Filename: filename, Err: fmt.Errorf("confirm failed: %w", err)}
 	}
 
-	return uploadResult{Filename: att.Filename, Link: cfg.apiBase + confirmed.URL}
+	return uploadResult{Filename: filename, Link: cfg.apiBase + confirmed.URL}
 }
 
 func downloadAttachment(url string) ([]byte, error) {

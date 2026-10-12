@@ -50,11 +50,11 @@ type uploadResult struct {
 // same three steps api/upload's own presign/confirm do for the website -
 // just fronted by one more hop so the bot never needs a Spools API token at
 // all, only the shared bot secret already on every request (see botAPI).
-// Server-side resolves discordUserID to whichever Spools account should
-// own this (their own linked account, or the shared fallback), and - for
-// the fallback case - appends the mandatory attribution line to
-// description itself; the bot doesn't compose that locally.
-func uploadAttachment(cfg config, discordUserID string, att *discordgo.MessageAttachment, customName, description string) uploadResult {
+// Server-side resolves discordUserID to whichever Spools account should own
+// this (their own linked account, or the shared fallback); discordUsername
+// is only stored (as display metadata, for the fallback case) when the
+// server decides it's actually needed, never assumed here.
+func uploadAttachment(cfg config, discordUserID, discordUsername string, att *discordgo.MessageAttachment, customName, description string) uploadResult {
 	category, ext, ok := categoryFor(att.Filename)
 	if !ok {
 		return uploadResult{Filename: att.Filename, Err: fmt.Errorf("unsupported file type")}
@@ -103,14 +103,15 @@ func uploadAttachment(cfg config, discordUserID string, att *discordgo.MessageAt
 		URL string `json:"url"`
 	}
 	err = botAPI(cfg, "upload-confirm", map[string]any{
-		"discordUserId": discordUserID,
-		"key":           presigned.Key,
-		"filename":      filename,
-		"contentType":   contentType,
-		"size":          len(data),
-		"category":      category,
-		"isPublic":      true,
-		"description":   description,
+		"discordUserId":   discordUserID,
+		"discordUsername": discordUsername,
+		"key":             presigned.Key,
+		"filename":        filename,
+		"contentType":     contentType,
+		"size":            len(data),
+		"category":        category,
+		"isPublic":        true,
+		"description":     description,
 	}, &confirmed)
 	if err != nil {
 		return uploadResult{Filename: filename, Err: fmt.Errorf("confirm failed: %w", err)}

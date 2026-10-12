@@ -334,7 +334,7 @@ func handleUploadCommand(s *discordgo.Session, i *discordgo.InteractionCreate, c
 		return
 	}
 
-	result := uploadAttachment(cfg, interactionUserID(i), att, name, description)
+	result := uploadAttachment(cfg, interactionUserID(i), interactionUsername(i), att, name, description)
 	embed := resultEmbed([]uploadResult{result})
 	if _, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
 		Embeds: &[]*discordgo.MessageEmbed{embed},
@@ -476,6 +476,7 @@ func handleModalSubmit(s *discordgo.Session, i *discordgo.InteractionCreate, cfg
 	}
 
 	userID := interactionUserID(i)
+	username := interactionUsername(i)
 	results := make([]uploadResult, len(item.attachments))
 	for idx, att := range item.attachments {
 		// A custom name applies to every attachment in this prompt, so more
@@ -484,7 +485,7 @@ func handleModalSubmit(s *discordgo.Session, i *discordgo.InteractionCreate, cfg
 		if attName != "" && len(item.attachments) > 1 {
 			attName = fmt.Sprintf("%s (%d)", name, idx+1)
 		}
-		results[idx] = uploadAttachment(cfg, userID, att, attName, description)
+		results[idx] = uploadAttachment(cfg, userID, username, att, attName, description)
 	}
 
 	embed := resultEmbed(results)
@@ -519,6 +520,19 @@ func interactionUserID(i *discordgo.InteractionCreate) string {
 	}
 	if i.User != nil {
 		return i.User.ID
+	}
+	return ""
+}
+
+// interactionUsername is interactionUserID's counterpart - the bot already
+// has this on hand from the interaction itself, so there's no need to
+// resolve it separately (and no separate Discord API call to make).
+func interactionUsername(i *discordgo.InteractionCreate) string {
+	if i.Member != nil && i.Member.User != nil {
+		return i.Member.User.Username
+	}
+	if i.User != nil {
+		return i.User.Username
 	}
 	return ""
 }

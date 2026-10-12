@@ -93,7 +93,7 @@ var slashCommands = []*discordgo.ApplicationCommand{
 	},
 	{
 		Name:        "link",
-		Description: "Connect your own Amber Spools account, so uploads go under your name instead of the shared bot account",
+		Description: "Connect your own Amber Spools account, so uploads go under your name",
 		// DM-only: linking means pasting a real credential, which must never
 		// be typeable in a public channel where anyone could read it back.
 		Contexts: &[]discordgo.InteractionContextType{discordgo.InteractionContextBotDM},

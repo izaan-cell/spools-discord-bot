@@ -69,9 +69,15 @@ func uploadAttachment(cfg config, discordUserID, discordUsername string, att *di
 	// the content-type/category checks above already depend on it, and a
 	// renamed-without-an-extension file would otherwise stop being
 	// recognized as an image/gif/video everywhere else that reads it back.
+	// Strips whatever extension customName already has (case-insensitively,
+	// and regardless of whether it happens to match the real one) rather
+	// than only the exact lowercase real extension - otherwise "photo.JPG"
+	// or a wrong guess like "photo.png" on a real .jpg would come out as
+	// "photo.JPG.jpg" / "photo.png.jpg" instead of a clean "photo.jpg".
 	filename := att.Filename
 	if customName != "" {
-		filename = strings.TrimSuffix(customName, "."+ext) + "." + ext
+		base := strings.TrimSuffix(customName, filepath.Ext(customName))
+		filename = base + "." + ext
 	}
 
 	data, err := downloadAttachment(att.URL)

@@ -86,6 +86,12 @@ var slashCommands = []*discordgo.ApplicationCommand{
 				Name:        "query",
 				Description: "Filename to search for",
 				Required:    true,
+				// Discord's embed title cap is 256 chars; searchResultsEmbed
+				// puts the query straight into one ("Search: <query>"). An
+				// unbounded query (6000 chars by default) would overflow
+				// that and make the result edit silently fail, leaving the
+				// interaction stuck on "thinking" forever.
+				MaxLength: 100,
 			},
 		},
 	},
@@ -228,15 +234,18 @@ func handleSlashCommand(s *discordgo.Session, i *discordgo.InteractionCreate, cf
 	case "autoprompt":
 		enabled := data.GetOption("enabled").BoolValue()
 		userID := interactionUserID(i)
+		if err := ackEphemeral(s, i, "/autoprompt"); err != nil {
+			return
+		}
 		if err := setAutoPrompt(cfg, userID, enabled); err != nil {
-			respondEphemeral(s, i, "Couldn't save that, try again in a moment.")
+			editEphemeral(s, i, "Couldn't save that, try again in a moment.")
 			return
 		}
 		state := "on"
 		if !enabled {
 			state = "off"
 		}
-		respondEphemeral(s, i, fmt.Sprintf("Upload prompts are now **%s** for you.", state))
+		editEphemeral(s, i, fmt.Sprintf("Upload prompts are now **%s** for you.", state))
 	case "upload":
 		handleUploadCommand(s, i, cfg, data)
 	case "edit":
@@ -251,15 +260,18 @@ func handleSlashCommand(s *discordgo.Session, i *discordgo.InteractionCreate, cf
 		handleLinkCommand(s, i, cfg, data)
 	case "unlink":
 		userID := interactionUserID(i)
+		if err := ackEphemeral(s, i, "/unlink"); err != nil {
+			return
+		}
 		wasLinked, err := unlinkAccount(cfg, userID)
 		if err != nil {
-			respondEphemeral(s, i, fmt.Sprintf("Couldn't unlink: %s", err.Error()))
+			editEphemeral(s, i, fmt.Sprintf("Couldn't unlink: %s", err.Error()))
 			return
 		}
 		if wasLinked {
-			respondEphemeral(s, i, "Unlinked. Your uploads will go through the shared Spools bot account again.")
+			editEphemeral(s, i, "Unlinked. Your uploads will go through the shared Spools bot account again.")
 		} else {
-			respondEphemeral(s, i, "You don't have an account linked.")
+			editEphemeral(s, i, "You don't have an account linked.")
 		}
 	}
 }
@@ -280,11 +292,7 @@ func handleLinkCommand(s *discordgo.Session, i *discordgo.InteractionCreate, cfg
 	token := strings.TrimSpace(opt.StringValue())
 
 	// Validating is a network call, acknowledge first.
-	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral},
-	}); err != nil {
-		log.Printf("could not ack /link: %v", err)
+	if err := ackEphemeral(s, i, "/link"); err != nil {
 		return
 	}
 
@@ -371,11 +379,14 @@ func handleEditCommand(s *discordgo.Session, i *discordgo.InteractionCreate, cfg
 		return
 	}
 
-	if err := editMedia(cfg, interactionUserID(i), key, filename, description); err != nil {
-		respondEphemeral(s, i, fmt.Sprintf("Couldn't update that: %s", err.Error()))
+	if err := ackEphemeral(s, i, "/edit"); err != nil {
 		return
 	}
-	respondEphemeral(s, i, "Updated.")
+	if err := editMedia(cfg, interactionUserID(i), key, filename, description); err != nil {
+		editEphemeral(s, i, fmt.Sprintf("Couldn't update that: %s", err.Error()))
+		return
+	}
+	editEphemeral(s, i, "Updated.")
 }
 
 func handleSearchCommand(s *discordgo.Session, i *discordgo.InteractionCreate, cfg config, data discordgo.ApplicationCommandInteractionData) {
@@ -553,11 +564,28 @@ func respondEphemeral(s *discordgo.Session, i *discordgo.InteractionCreate, cont
 	})
 }
 
-// editEphemeral follows up a deferred response (see
-// InteractionResponseDeferredChannelMessageWithSource call sites above)
-// with plain text - used for /link and /search, whose results aren't known
-// until after a network call completes. Visibility (ephemeral or not) was
-// already set on the initial deferred ack, editing can't change it.
+// ackEphemeral sends the deferred ack Discord requires within 3 seconds of
+// any interaction that's about to make a network call (botAPI, under
+// variable latency - cold starts, slow responses) before it can give a real
+// answer. Every handler that calls out to api/discord-bot before responding
+// must call this first, or a slow enough request shows the user "This
+// interaction failed" even when the underlying action actually succeeded.
+func ackEphemeral(s *discordgo.Session, i *discordgo.InteractionCreate, cmdName string) error {
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral},
+	})
+	if err != nil {
+		log.Printf("could not ack %s: %v", cmdName, err)
+	}
+	return err
+}
+
+// editEphemeral follows up a deferred response (see ackEphemeral and the
+// non-ephemeral defers in handleUploadCommand/handleSearchCommand) with
+// plain text, once a network call's real result is known. Visibility
+// (ephemeral or not) was already set on the initial deferred ack, editing
+// can't change it.
 func editEphemeral(s *discordgo.Session, i *discordgo.InteractionCreate, content string) {
 	if _, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{Content: &content}); err != nil {
 		log.Printf("could not edit interaction response: %v", err)

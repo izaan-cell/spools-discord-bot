@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"time"
 )
 
 // searchItem mirrors the fields api/media-info's handleList returns that
@@ -29,7 +30,13 @@ func searchDiscover(cfg config, query string, limit int) ([]searchItem, error) {
 	u := fmt.Sprintf("%s/api/media-info?scope=discover&sort=new&category=all&limit=%d&q=%s",
 		cfg.apiBase, limit, url.QueryEscape(query))
 
-	resp, err := http.Get(u)
+	// Every other HTTP call in this codebase sets an explicit timeout
+	// (botAPI: 30s, downloadAttachment/putObject: 60s) - http.Get uses
+	// http.DefaultClient, which has none, so a hung Spools API would block
+	// this forever and leave /search stuck on "thinking" until Discord's
+	// 15-minute webhook token expiry.
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Get(u)
 	if err != nil {
 		return nil, err
 	}

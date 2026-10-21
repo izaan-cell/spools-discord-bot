@@ -1,2 +1,4 @@
 /spools-discord-bot
+/discordbot
 *.exe
+.DS_Store

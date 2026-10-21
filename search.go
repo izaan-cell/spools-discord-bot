@@ -13,10 +13,10 @@ import (
 // main Spools repo (not imported, same standalone-module reasoning as
 // upload.go).
 type searchItem struct {
+	Key       string `json:"key"`
 	Filename  string `json:"filename"`
 	Category  string `json:"category"`
 	ViewCount int64  `json:"viewCount"`
-	URL       string `json:"url"`
 }
 
 type searchResponse struct {

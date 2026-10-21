@@ -142,7 +142,9 @@ func searchResultsEmbed(query string, items []searchItem, apiBase string) *disco
 
 	lines := make([]string, len(items))
 	for i, item := range items {
-		lines[i] = fmt.Sprintf("• [%s](%s%s) — %d view%s", item.Filename, apiBase, item.URL, item.ViewCount, plural(item.ViewCount))
+		// item.Key, not a raw-file URL - /v/<key> is the share page people
+		// should land on, not a direct link straight to the file bytes.
+		lines[i] = fmt.Sprintf("• [%s](%s/v/%s) — %d view%s", item.Filename, apiBase, item.Key, item.ViewCount, plural(item.ViewCount))
 	}
 
 	return &discordgo.MessageEmbed{

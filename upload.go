@@ -123,7 +123,9 @@ func uploadAttachment(cfg config, discordUserID, discordUsername string, att *di
 		return uploadResult{Filename: filename, Err: fmt.Errorf("confirm failed: %w", err)}
 	}
 
-	return uploadResult{Filename: filename, Link: cfg.apiBase + confirmed.URL}
+	// confirmed.URL is "/" + key, the raw direct file link - not a page.
+	// /v/<key> is the real share/confirmation page people should land on.
+	return uploadResult{Filename: filename, Link: cfg.apiBase + "/v/" + confirmed.Key}
 }
 
 func downloadAttachment(url string) ([]byte, error) {

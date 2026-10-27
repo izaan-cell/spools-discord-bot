@@ -134,6 +134,7 @@ func main() {
 	case <-readyCh:
 		log.Printf("watching all channels, posting to %s", cfg.apiBase)
 		go runStatusRotation(session, cfg)
+		go runBotSelfReport(cfg)
 	case <-time.After(20 * time.Second):
 		log.Println("WARNING: no READY event received within 20s - connected but the gateway handshake may be stuck; slash commands will not be registered until it arrives")
 	}

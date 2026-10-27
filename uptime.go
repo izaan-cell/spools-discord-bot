@@ -88,3 +88,24 @@ func reportUptimeCheck(cfg config, body uptimeCheckRequest) error {
 	defer resp.Body.Close()
 	return nil
 }
+
+// runBotSelfReport reports "the bot is alive and connected" every 5 minutes,
+// started only once Discord's READY event has actually fired. There's no
+// external way to ping the bot itself the way website/api are pinged - if
+// this process dies, these reports simply stop arriving, and api/status
+// marks the target stale past ~15 minutes of silence rather than trusting
+// a last-known isUp:true forever.
+func runBotSelfReport(cfg config) {
+	report := func() {
+		if err := reportUptimeCheck(cfg, uptimeCheckRequest{Target: "bot", IsUp: true}); err != nil {
+			log.Printf("could not report bot self-check: %v", err)
+		}
+	}
+	report()
+
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		report()
+	}
+}

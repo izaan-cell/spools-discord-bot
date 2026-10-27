@@ -71,6 +71,11 @@ func main() {
 		}
 	}()
 
+	// Doesn't depend on Discord at all - starts regardless of whether the
+	// gateway connection below succeeds, so uptime monitoring keeps working
+	// even if Discord itself is having problems.
+	go runUptimeChecks(cfg)
+
 	session, err := discordgo.New("Bot " + cfg.discordToken)
 	if err != nil {
 		log.Fatalf("could not create discord session: %v", err)

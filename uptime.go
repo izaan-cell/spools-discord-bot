@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"time"
@@ -86,6 +88,15 @@ func reportUptimeCheck(cfg config, body uptimeCheckRequest) error {
 		return err
 	}
 	defer resp.Body.Close()
+
+	// client.Do only errors on network/connection failures, never on an
+	// HTTP error status - without this check, a rejected request (bad
+	// secret, bad payload, server error) looked like silent success: no
+	// error logged, no row inserted, no visible sign anything was wrong.
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return fmt.Errorf("api/status responded with status %d: %s", resp.StatusCode, respBody)
+	}
 	return nil
 }
 
